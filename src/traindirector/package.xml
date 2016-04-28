@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package>
+  <name>traindirector</name>
+  <version>0.1.0</version>
+  <description>Package for interacting with TrainDirector3</description>
+
+  <!-- One maintainer tag required, multiple allowed, one person per tag --> 
+  <!-- Example:  -->
+  <!-- <maintainer email="jane.doe@example.com">Jane Doe</maintainer> -->
+  <maintainer email="emfinger@isis.vanderbilt.edu">William Emfinger</maintainer>
+
+  <!-- One license tag required, multiple allowed, one license per tag -->
+  <!-- Commonly used license strings: -->
+  <!--   BSD, MIT, Boost Software License, GPLv2, GPLv3, LGPLv2.1, LGPLv3 -->
+  <license>MIT</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <export>
+  </export>
+</package>
