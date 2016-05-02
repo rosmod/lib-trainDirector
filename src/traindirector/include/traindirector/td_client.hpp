@@ -12,7 +12,7 @@ public:
   TrainDirClient() {}
   ~TrainDirClient() {}
 
-  bool create_connection(int port, std::string host = "localhost");
+  bool create_connection(int port = 8900, std::string host = "127.0.0.1");
   void close_connection();
 
   void click(int x, int y);
