@@ -20,27 +20,49 @@
 #include <memory>
 #include <string>
 
+// IPV4 and IPV4 Sender & Receiver connection management
+
+// Currently only UDP (SOCK_DGRAM) is fully supported
+
 class Connection {
+private:
+  int sockfd;
+  struct sockaddr* local_addr;
+  struct sockaddr* remote_addr;
+
 public:
   bool isServer;
   std::string serverIP;
-  int bufferSize;
   int serverPort;
   int receiveTimeout;
+  int socketFamily;
+  int transport;
+  int maxConnRequests;
   
   Connection ()
-    : bufferSize (0),
-      receiveTimeout (1)
+    : isServer(false),
+      serverIP("127.0.0.1"),
+      serverPort(80),
+      receiveTimeout (1),
+      socketFamily(AF_INET),
+      transport(SOCK_DGRAM),
+      maxConnRequests(5)
   {
   }
 
   Connection (const Connection &s)
     : isServer (s.isServer),
-      bufferSize (s.bufferSize),
       serverIP (s.serverIP),
       serverPort (s.serverPort),
-      receiveTimeout (s.receiveTimeout)
+      receiveTimeout (s.receiveTimeout),
+      socketFamily(s.socketFamily),
+      transport(s.transport),
+      maxConnRequests(s.maxConnRequests)
   {
+  }
+
+  ~Connection() {
+    Close();
   }
 
   Connection & operator= (const Connection &s) 
@@ -53,393 +75,152 @@ public:
     return *this;
   }
 
-  virtual void swap (Connection &s) 
+  void swap (Connection &s) 
   {
     std::swap (isServer, s.isServer);
-    std::swap (bufferSize, s.bufferSize);
+    std::swap (serverIP, s.serverIP);
     std::swap (serverPort, s.serverPort);
     std::swap (receiveTimeout, s.receiveTimeout);
-    std::swap (serverIP, s.serverIP);
+    std::swap (socketFamily, s.socketFamily);
+    std::swap (transport, s.transport);
+    std::swap (maxConnRequests, s.maxConnRequests);
   }
 
-  virtual Connection* clone() const 
+  Connection* clone() const 
   {
     return new Connection( *this );
   }
 
-  int Initialize(bool server) {
+  int Initialize(std::string ip, int port, bool server=false) {
+    serverIP = ip;
+    serverPort = port;
     isServer = server;
-    if (isServer) {
-      return this->InitializeServer();
+
+    if (serverIP.find("::") != std::string::npos) {
+      // ipv6
+      socketFamily = AF_INET6;
+      local_addr = (struct sockaddr *)new struct sockaddr_in6;
+      ((struct sockaddr_in6 *)local_addr)->sin6_family = socketFamily;
+      ((struct sockaddr_in6 *)local_addr)->sin6_port = htons(serverPort);
+      ((struct sockaddr_in6 *)local_addr)->sin6_scope_id = 0;
+      remote_addr = (struct sockaddr *)new struct sockaddr_in6;
+      ((struct sockaddr_in6 *)remote_addr)->sin6_family = socketFamily;
+      ((struct sockaddr_in6 *)remote_addr)->sin6_port = htons(serverPort);
+      ((struct sockaddr_in6 *)remote_addr)->sin6_scope_id = 0;
     }
     else {
-      return this->InitializeClient();
+      // ipv4
+      socketFamily = AF_INET;
+      local_addr = (struct sockaddr *)new struct sockaddr_in;
+      ((struct sockaddr_in *)local_addr)->sin_family = socketFamily;
+      ((struct sockaddr_in *)local_addr)->sin_port = htons(serverPort);
+      remote_addr = (struct sockaddr *)new struct sockaddr_in;
+      ((struct sockaddr_in *)remote_addr)->sin_family = socketFamily;
+      ((struct sockaddr_in *)remote_addr)->sin_port = htons(serverPort);
+    }
+
+    // create the socket
+    if ((sockfd = socket(socketFamily, transport, 0)) < 0) {
+      int errsv = errno;
+      std::string err = "Couldn't open socket: " + std::string(strerror(errsv));
+      throw err;
+    }
+
+    // allow address reuse
+    int optval = 1;
+    int retval = 0;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (const void *)&optval , sizeof(optval)) != 0) {
+      int errsv = errno;
+      std::string err = "Couldn't set REUSEADDR option: " + std::string(strerror(errsv));
+      throw err;
+    }
+    
+    // convert to binary
+    if ( socketFamily == AF_INET6 ) {
+      // ipv6
+      if (inet_pton(socketFamily, serverIP.c_str(), (void *)&(((struct sockaddr_in6 *)local_addr)->sin6_addr.s6_addr)) != 1) {
+	int errsv = errno;
+	std::string err = "Couldn't convert ipv6 address: " + std::string(strerror(errsv));
+	throw err;
+      } 
+    }
+    else if ( socketFamily == AF_INET ) {
+      // ipv4
+      if (inet_pton(socketFamily, serverIP.c_str(), (void *)&(((struct sockaddr_in *)local_addr)->sin_addr.s_addr)) != 1) {
+	int errsv = errno;
+	std::string err = "Couldn't convert ipv4 address: " + std::string(strerror(errsv));
+	throw err;
+      }
+    }
+
+    // Configure the socket
+    if (isServer) {
+      // Server
+      //   -- both tcp and udp
+      if (bind(sockfd,(struct sockaddr *)local_addr, sizeof(*local_addr))<0) {
+	close(sockfd);
+	int errsv = errno;
+	std::string err = "Couldn't bind: " + std::string(strerror(errsv));
+	throw err;
+      }
+      if ( transport == SOCK_STREAM ) {
+	// tcp
+	if (listen(sockfd, maxConnRequests) < 0) {
+	  close(sockfd);
+	  int errsv = errno;
+	  std::string err = "Couldn't listen: " + std::string(strerror(errsv));
+	  throw err;
+	}
+      }
+    }
+    else {
+      // Client
+      if ( transport == SOCK_STREAM ) {
+	// tcp
+	if (connect(sockfd, (struct sockaddr *)local_addr, sizeof(*local_addr))<0) {
+	  close(sockfd);
+	  int errsv = errno;
+	  std::string err = "Couldn't bind: " + std::string(strerror(errsv));
+	  throw err;
+	}
+      }
+    }
+    
+    // set the recv timeout on the socket
+    struct timeval tv;
+    tv.tv_sec = receiveTimeout;
+    tv.tv_usec = 0;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+      close(sockfd);
+      int errsv = errno;
+      std::string err = "Couldn't set timeout: " + std::string(strerror(errsv));
+      throw err;
     }
   }
 
-  virtual void Close() {}
-
-  virtual long Send(const char *buffer, long len) {
-    return -1;
-  }
-  virtual long Receive(char *buffer, long len) {
-    return -1;
-  }
-
-  virtual int InitializeServer() {
-    return -1;
-  }
-  virtual int InitializeClient() {
-    return -1;
-  }
-};
-
-class IPV4_Connection : public Connection {
-public:
-  int sockfd;
-  struct sockaddr_in local_addr;
-  struct sockaddr_in remote_addr;
-
-  IPV4_Connection()
-    : Connection()
-  {
-    serverPort = 7777;
-    receiveTimeout = 5;
-    serverIP = "10.1.1.1";
-  }
-
-  IPV4_Connection(const IPV4_Connection &s)
-    : Connection(s),
-      sockfd(s.sockfd),
-      local_addr(s.local_addr),
-      remote_addr(s.remote_addr)
-  {
-  }
-
-  IPV4_Connection & operator= (const IPV4_Connection &s)
-  {
-    if (&s != this)
-      {
-        IPV4_Connection tmp (s);
-        swap (tmp);
-      }
-    return *this;
-  }
-
-  virtual IPV4_Connection* clone() const 
-  {
-    return new IPV4_Connection( *this );
-  }
-
-  virtual void swap (IPV4_Connection &s)
-  {
-    std::swap (sockfd, s.sockfd);
-    std::swap (local_addr, s.local_addr);
-    std::swap (remote_addr, s.remote_addr);
-  }
-
-  virtual void Close()
+  void Close()
   {
     close(sockfd);
+    delete local_addr;
+    delete remote_addr;
   }
 
-  ~IPV4_Connection() 
-  {
-    Close();
-  }
-
-  virtual long Send(const char *buffer, long len) {
+  long Send(const char *buffer, long len) {
     long bytes;
     if ((bytes = sendto(sockfd, buffer, len, 0, (struct sockaddr *) &remote_addr, sizeof(remote_addr))) == -1 ) {
       int errsv = errno;
-      printf("ERROR : Couldn't send : %s\n", strerror(errsv) );
+      std::string err = "Couldn't send: " + std::string(strerror(errsv));
+      throw err;
     }
-    int size;
-    int error = ioctl(sockfd, SIOCOUTQ, &size);
-    if ( size > bufferSize ) 
-      bufferSize = size;
     return bytes;
   }
 
-  virtual long Receive(char *buffer, long len) {
+  long Receive(char *buffer, long len) {
     socklen_t remote_addr_len = sizeof(remote_addr);
     long bytes;
     if ((bytes = recvfrom(sockfd, buffer, len,0,(struct sockaddr *)&remote_addr, &remote_addr_len)) == -1) {
-      int errsv = errno;
-      printf("ERROR: Haven't received response! : %s!\n", strerror(errsv));
     }
     return bytes;
   }
-
-  virtual int InitializeServer() {
-    printf("Initializing IPV4 Server\n");
-    if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) <0) {
-      int errsv = errno;
-      printf("ERROR opening socket : %s\n", strerror(errsv));
-      return -1;
-    }
-
-    int optval = 1;
-    int retval = 0;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (const void *)&optval , sizeof(optval))!=0) {
-      printf("ERROR setting sockopt : %d, %s\n",retval, strerror(retval));
-      return -1;
-    }
-    
-    local_addr.sin_family = AF_INET;
-    local_addr.sin_port = htons(serverPort);
-    
-    if ( (retval = inet_pton(AF_INET, serverIP.c_str(), (void *)&(local_addr.sin_addr.s_addr))) !=1) {
-      printf("ERROR: inet_pton : %d, %s\n",retval, strerror(retval));
-      return -1;
-    }  
-    
-    if (bind(sockfd,(struct sockaddr *)&local_addr, sizeof(local_addr))<0) {
-      printf("Couldn't bind!\n");
-      close(sockfd);
-      return -1;
-    }
-    
-    struct timeval tv;
-    tv.tv_sec = receiveTimeout;
-    tv.tv_usec = 0;
-    if ( (retval=setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO,&tv,sizeof(tv))) < 0) {
-      printf("Couldn't set sockopts : %d, %s\n",retval, strerror(retval));
-      close(sockfd);
-      return -1;
-    }
-
-    printf ( "Waiting on %s:%d\n",serverIP.c_str(),serverPort);
-    return 0;
-  }
-  
-  virtual int InitializeClient() {
-    printf("Initializing IPV4 Client\n");
-    if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) <0) {
-      int errsv = errno;
-      printf("ERROR opening socket : %s\n", strerror(errsv));
-      return -1;
-    }
-  
-    int optval = 1;
-    int retval = 0;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (const void *)&optval , sizeof(optval))!=0) {
-      int errsv = errno;
-      printf("ERROR setting sockopt : %s\n", strerror(errsv));
-      return -1;
-    }
-  
-    remote_addr.sin_family = AF_INET;
-    remote_addr.sin_port = htons(serverPort);
-    
-    if ( (retval = inet_pton(AF_INET, serverIP.c_str(), (void *)&(remote_addr.sin_addr.s_addr))) !=1) {
-      printf("ERROR: inet_pton : %d\n",retval);
-      return -1;
-    }
-  
-    struct timeval tv;
-    tv.tv_sec = receiveTimeout;
-    tv.tv_usec = 0;
-    if ( (retval=setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO,&tv,sizeof(tv))) < 0) {
-      printf("Couldn't set sockopts : %d, %s\n",retval, strerror(retval));
-      close(sockfd);
-      return -1;
-    }
-    printf ( "Connecting to %s:%d\n",serverIP.c_str(),serverPort);
-    return 0;
-  }  
-
-  void *get_in_addr(struct sockaddr *sa){
-    if (sa->sa_family == AF_INET){
-      return &(((struct sockaddr_in*)sa)->sin_addr);
-    }
-    return &(((struct sockaddr_in6*)sa)->sin6_addr);
-  }
-
-  u_short get_in_port(struct sockaddr *sa)
-  {
-    if (sa->sa_family == AF_INET) {
-      return ((struct sockaddr_in*)sa)->sin_port;
-    }
-
-    return ((struct sockaddr_in6*)sa)->sin6_port;
-  }
-
 };
-
-class IPV6_Connection : public Connection {
-public:
-  int sockfd;
-  struct sockaddr_in6 local_addr;
-  struct sockaddr_in6 remote_addr;
-
-  IPV6_Connection()
-    : Connection()
-  {
-    serverPort = 7777;
-    receiveTimeout = 5;
-    serverIP = "2001:470:489e::3";
-  }
-
-  IPV6_Connection(const IPV6_Connection &s)
-    : Connection(s),
-      sockfd(s.sockfd),
-      local_addr(s.local_addr),
-      remote_addr(s.remote_addr)
-  {
-  }
-
-  IPV6_Connection & operator= (const IPV6_Connection &s)
-  {
-    if (&s != this)
-      {
-        IPV6_Connection tmp (s);
-        swap (tmp);
-      }
-    return *this;
-  }
-
-  virtual IPV6_Connection* clone() const 
-  {
-    return new IPV6_Connection( *this );
-  }
-
-  virtual void swap (IPV6_Connection &s)
-  {
-    std::swap (sockfd, s.sockfd);
-    std::swap (local_addr, s.local_addr);
-    std::swap (remote_addr, s.remote_addr);
-  }
-
-  virtual void Close()
-  {
-    close(sockfd);
-  }
-
-  ~IPV6_Connection() 
-  {
-    Close();
-  }
-
-  virtual long Send(const char *buffer, long len) {
-    long bytes;
-    if ((bytes = sendto(sockfd, buffer, len, 0, (struct sockaddr *) &remote_addr, sizeof(remote_addr))) == -1 ) {
-      int errsv = errno;
-      printf("ERROR : Couldn't send : %s\n", strerror(errsv) );
-    }
-    int size;
-    int error = ioctl(sockfd, SIOCOUTQ, &size);
-    if ( size > bufferSize ) 
-      bufferSize = size;
-    return bytes;
-  }
-
-  virtual long Receive(char *buffer, long len) {
-    socklen_t remote_addr_len = sizeof(remote_addr);
-    long bytes;
-    if ((bytes = recvfrom(sockfd, buffer, len,0,(struct sockaddr *)&remote_addr, &remote_addr_len)) == -1) {
-      int errsv = errno;
-      printf("ERROR: Haven't received response! : %s!\n", strerror(errsv));
-    }
-    return bytes;
-  }
-
-  virtual int InitializeServer() {
-    printf("Initializing IPV6 Server\n");
-    if ((sockfd = socket(AF_INET6, SOCK_DGRAM, 0)) <0) {
-      int errsv = errno;
-      printf("ERROR opening socket : %s\n", strerror(errsv));
-      return -1;
-    }
-
-    int optval = 1;
-    int retval = 0;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (const void *)&optval , sizeof(optval))!=0) {
-      printf("ERROR setting sockopt : %d, %s\n",retval, strerror(retval));
-      return -1;
-    }
-    
-    local_addr.sin6_family = AF_INET6;
-    local_addr.sin6_port = htons(serverPort);
-    local_addr.sin6_scope_id = 0;
-    
-    if ( (retval = inet_pton(AF_INET6, serverIP.c_str(), (void *)&(local_addr.sin6_addr.s6_addr))) !=1) {
-      printf("ERROR: inet_pton : %d, %s\n",retval, strerror(retval));
-      return -1;
-    }  
-    
-    if (bind(sockfd,(struct sockaddr *)&local_addr, sizeof(local_addr))<0) {
-      printf("Couldn't bind!\n");
-      close(sockfd);
-      return -1;
-    }
-    
-    struct timeval tv;
-    tv.tv_sec = receiveTimeout;
-    tv.tv_usec = 0;
-    if ( (retval=setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO,&tv,sizeof(tv))) < 0) {
-      printf("Couldn't set sockopts : %d, %s\n",retval, strerror(retval));
-      close(sockfd);
-      return -1;
-    }
-
-    printf ( "Waiting on %s:%d\n",serverIP.c_str(),serverPort);
-    return 0;
-  }
-  
-  virtual int InitializeClient() {
-    printf("Initializing IPV6 Client\n");
-    if ((sockfd = socket(AF_INET6, SOCK_DGRAM, 0)) <0) {
-      int errsv = errno;
-      printf("ERROR opening socket : %s\n", strerror(errsv));
-      return -1;
-    }
-  
-    int optval = 1;
-    int retval = 0;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (const void *)&optval , sizeof(optval))!=0) {
-      int errsv = errno;
-      printf("ERROR setting sockopt : %s\n", strerror(errsv));
-      return -1;
-    }
-  
-    remote_addr.sin6_family = AF_INET6;
-    remote_addr.sin6_port = htons(serverPort);
-    remote_addr.sin6_scope_id = 0;
-    
-    if ( (retval = inet_pton(AF_INET6, serverIP.c_str(), (void *)&(remote_addr.sin6_addr.s6_addr))) !=1) {
-      printf("ERROR: inet_pton : %d\n",retval);
-      return -1;
-    }
-  
-    struct timeval tv;
-    tv.tv_sec = receiveTimeout;
-    tv.tv_usec = 0;
-    if ( (retval=setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO,&tv,sizeof(tv))) < 0) {
-      printf("Couldn't set sockopts : %d, %s\n",retval, strerror(retval));
-      close(sockfd);
-      return -1;
-    }
-    printf ( "Connecting to %s:%d\n",serverIP.c_str(),serverPort);
-    return 0;
-  }  
-
-  void *get_in_addr(struct sockaddr *sa){
-    if (sa->sa_family == AF_INET){
-      return &(((struct sockaddr_in*)sa)->sin_addr);
-    }
-    return &(((struct sockaddr_in6*)sa)->sin6_addr);
-  }
-
-  u_short get_in_port(struct sockaddr *sa)
-  {
-    if (sa->sa_family == AF_INET) {
-      return ((struct sockaddr_in*)sa)->sin_port;
-    }
-
-    return ((struct sockaddr_in6*)sa)->sin6_port;
-  }
-
-};
-
 #endif

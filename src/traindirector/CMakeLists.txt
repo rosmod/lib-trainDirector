@@ -14,3 +14,5 @@ else()
 endif()
 
 include_directories(include)
+add_library(traindirector
+	    src/traindirector/td_client.cpp)
