@@ -5,7 +5,7 @@
 #include <sstream>
 #include <vector>
 
-#include "ConnectionSubsys.hpp"
+#include "Connection.hpp"
 
 class TrainDirClient {
 public:
@@ -19,6 +19,8 @@ public:
   void run();
 
 private:
+  void sendCommand(std::string command);
+
   Connection conn;
 };
 
