@@ -9,11 +9,14 @@
 
 class TrainDirClient {
 public:
-  TrainDirClient();
-  ~TrainDirClient();
+  TrainDirClient() {}
+  ~TrainDirClient() {}
 
   bool create_connection(int port, std::string host = "localhost");
   void close_connection();
+
+  void click(int x, int y);
+  void run();
 
 private:
   Connection conn;
